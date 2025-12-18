@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>短視頻分析戰情室 V2.3.6 - 終極穩定版</title>
+    <title>短視頻分析戰情室 V2.3.7 - 穩定修復版</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <!-- Firebase SDKs -->
@@ -12,16 +12,32 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        const firebaseConfig = JSON.parse(__firebase_config);
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
+        // 安全取得 Firebase 配置，防止 ReferenceError
+        let firebaseConfig = null;
+        try {
+            if (typeof __firebase_config !== 'undefined') {
+                firebaseConfig = JSON.parse(__firebase_config);
+            }
+        } catch (e) {
+            console.error("Firebase 配置解析失敗:", e);
+        }
+
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-        window.firebaseStore = { 
-            auth, db, appId, addDoc, collection, onSnapshot, query, serverTimestamp, 
-            onAuthStateChanged, signInAnonymously, signInWithCustomToken 
-        };
+        if (firebaseConfig) {
+            const app = initializeApp(firebaseConfig);
+            const auth = getAuth(app);
+            const db = getFirestore(app);
+
+            window.firebaseStore = { 
+                auth, db, appId, addDoc, collection, onSnapshot, query, serverTimestamp, 
+                onAuthStateChanged, signInAnonymously, signInWithCustomToken 
+            };
+        } else {
+            console.warn("未偵測到 Firebase 配置，將停用雲端存儲功能。");
+            // 提供 Mock 對象防止 UI 崩潰
+            window.firebaseStore = null;
+        }
     </script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
@@ -54,7 +70,7 @@
                         <input type="password" id="api-key-input" placeholder="Google API Key" class="bg-transparent border-none text-white placeholder:text-white/40 px-3 py-1 outline-none text-xs w-full md:w-48" />
                         <button id="save-key-btn" class="bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1 rounded-lg text-xs font-bold transition-all">儲存</button>
                     </div>
-                    <div id="user-status" class="text-[10px] text-indigo-300 text-right italic">正在連結雲端...</div>
+                    <div id="user-status" class="text-[10px] text-indigo-300 text-right italic">檢查雲端狀態...</div>
                 </div>
             </div>
         </header>
@@ -205,7 +221,7 @@
             <div class="bg-red-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4"><i data-lucide="alert-triangle" class="w-8 h-8 text-red-500"></i></div>
             <h3 class="text-xl font-black mb-2">發生錯誤</h3>
             <p id="error-message" class="text-slate-500 text-sm mb-6"></p>
-            <button onclick="document.getElementById('error-modal').classList.add('hidden')" class="w-full py-4 bg-slate-100 hover:bg-slate-200 rounded-2xl font-bold">關閉</button>
+            <button onclick="document.getElementById('error-modal').classList.add('hidden')" class="w-full py-4 bg-slate-100 hover:bg-slate-200 rounded-2xl font-bold transition-colors">關閉</button>
         </div>
     </div>
 
@@ -245,6 +261,10 @@
         }
 
         const initApp = async () => {
+            if (!window.firebaseStore) {
+                ui.userStatus.innerText = "本地預覽模式";
+                return;
+            }
             const { auth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } = window.firebaseStore;
             const savedKey = localStorage.getItem('gemini_api_key');
             if (savedKey) ui.inputs.apiKey.value = savedKey;
@@ -258,15 +278,20 @@
             });
 
             try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
                 } else {
                     await signInAnonymously(auth);
                 }
-            } catch (e) { ui.userStatus.innerText = "連線受限"; }
+            } catch (e) { 
+                console.error("Firebase Auth Error:", e);
+                ui.userStatus.innerText = "連線受限"; 
+            }
         };
 
         const startHistoryListener = (uid) => {
+            if (!window.firebaseStore) return;
             const { db, appId, collection, onSnapshot } = window.firebaseStore;
             const historyCol = collection(db, 'artifacts', appId, 'users', uid, 'analysis_history');
             onSnapshot(historyCol, (snapshot) => {
@@ -326,7 +351,7 @@
             ui.tabs.history.classList.remove('tab-active');
         };
 
-        // 修改：使用索引提取邏輯取代正則表達式，徹底避免 SyntaxError
+        // 穩定的字串解析邏輯，避免正則表達式斜槓報錯
         function parseGeminiJSON(text) {
             try {
                 return JSON.parse(text);
@@ -347,7 +372,7 @@
                         return JSON.parse(jsonStr.substring(firstBrace, lastBrace + 1));
                     } catch (innerE) {}
                 }
-                throw new Error("無法結構化 AI 回傳的數據，請重新執行。");
+                throw new Error("無法解析數據結構，請確認 API Key 有效並重試。");
             }
         }
 
@@ -355,21 +380,20 @@
             const apiKey = ui.inputs.apiKey.value.trim();
             const content = currentMode === 'text' ? ui.inputs.text.value.trim() : ui.inputs.url.value.trim();
             if (!apiKey) return showError("請輸入 API Key");
-            if (content.length < 5) return showError("內容不足以進行深度分析");
-            if (!currentUser) return showError("帳號正在同步中，請稍後");
+            if (content.length < 5) return showError("內容不足以進行分析");
 
             ui.buttons.analyze.disabled = true;
             ui.views.empty.classList.add('hidden');
             ui.views.dashboard.classList.add('hidden');
             ui.views.loading.classList.remove('hidden');
-            ui.loadingMsg.innerText = currentMode === 'url' ? "正在聯網擷取 YouTube 資訊..." : "正在計算風險指標...";
+            ui.loadingMsg.innerText = currentMode === 'url' ? "正在聯網擷取資訊..." : "正在計算風險指標...";
 
             const genConfig = { temperature: 0.1 };
             if (currentMode !== 'url') genConfig.responseMimeType = "application/json";
 
             const payload = {
                 contents: [{ parts: [{ text: `請深度分析此內容並給予精確百分比：${content}` }] }],
-                systemInstruction: { parts: [{ text: '你是一位稽核專家。嚴格僅返回一個 JSON 物件，內容必須包含 ai_percentage, fact_accuracy_percentage, hallucination_percentage, embellishment_percentage, scam_percentage, risk_level, verdict, logic_check, red_flags。' }] },
+                systemInstruction: { parts: [{ text: '你是一位資深稽核專家。嚴格僅返回一個 JSON 物件，內容必須包含 ai_percentage, fact_accuracy_percentage, hallucination_percentage, embellishment_percentage, scam_percentage, risk_level, verdict, logic_check, red_flags。' }] },
                 generationConfig: genConfig
             };
 
@@ -381,9 +405,12 @@
                 const raw = await resp.json();
                 const result = parseGeminiJSON(raw.candidates[0].content.parts[0].text);
                 
-                const { db, appId, collection, addDoc, serverTimestamp } = window.firebaseStore;
-                const historyCol = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'analysis_history');
-                await addDoc(historyCol, { ...result, timestamp: serverTimestamp(), mode: currentMode });
+                // 存儲紀錄
+                if (window.firebaseStore && currentUser) {
+                    const { db, appId, collection, addDoc, serverTimestamp } = window.firebaseStore;
+                    const historyCol = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'analysis_history');
+                    await addDoc(historyCol, { ...result, timestamp: serverTimestamp(), mode: currentMode });
+                }
                 
                 renderDashboard(result);
             } catch (err) {
@@ -429,7 +456,7 @@
         }
 
         const checkReady = setInterval(() => {
-            if (window.firebaseStore) {
+            if (typeof window.firebaseStore !== 'undefined') {
                 clearInterval(checkReady);
                 initApp();
                 if (window.lucide) window.lucide.createIcons();
